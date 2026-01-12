@@ -1,76 +1,92 @@
 /** @odoo-module */
 
-import { ReceiptScreen } from "@point_of_sale/app/screens/receipt_screen/receipt_screen";
+import { PosStore } from "@point_of_sale/app/services/pos_store";
 import { patch } from "@web/core/utils/patch";
-import { useService } from "@web/core/utils/hooks";
+import { OrderReceipt } from "@point_of_sale/app/screens/receipt_screen/receipt/order_receipt";
 
-patch(ReceiptScreen.prototype, {
-  setup() {
-    super.setup();
-    this.qz = useService("qz_tray");
-  },
+patch(PosStore.prototype, {
+  async printReceipt({
+    basic = false,
+    order = this.getOrder(),
+    printBillActionTriggered = false,
+  } = {}) {
+    // Try QZ Tray first
+    const qzService = this.env.services.qz_tray;
 
-  async printReceipt() {
-    // 1. Check if QZ is connected
-    try {
-      // Locate the Receipt HTML element in the POS
-      // Odoo 17/18/19 usually renders receipt in .pos-receipt-container
-      const receiptElement = document.querySelector(".pos-receipt-container");
+    if (qzService) {
+      try {
+        // Connect to QZ Tray
+        await qzService.connect();
 
-      if (!receiptElement) {
-        console.warn(
-          "QZ: Receipt element not found, falling back to browser print."
-        );
-        return super.printReceipt();
+        const qzLib = qzService.getQZ();
+        if (qzLib) {
+          // Get the renderer service from env
+          const renderer = this.env.services.renderer;
+
+          // Render receipt to HTML using Odoo's renderer
+          const receiptHtml = await renderer.toHtml(
+            OrderReceipt,
+            {
+              order,
+              basic_receipt: basic,
+            },
+            { addClass: "pos-receipt-print" }
+          );
+
+          // Wrap in proper HTML document for printing
+          const htmlContent = `
+            <html>
+            <head>
+              <style>
+                body { 
+                  font-family: 'Inconsolata', monospace; 
+                  font-size: 12px;
+                  width: 280px;
+                  margin: 0;
+                  padding: 10px;
+                }
+                .pos-receipt { width: 100%; }
+                img { max-width: 100%; }
+                table { width: 100%; }
+              </style>
+            </head>
+            <body>
+              ${receiptHtml.outerHTML}
+            </body>
+            </html>
+          `;
+
+          // Get default printer and print
+          const printerName = await qzLib.printers.getDefault();
+          console.log(`QZ: Printing POS receipt to ${printerName}...`);
+          await qzService.print(printerName, htmlContent, "pixel");
+
+          // Update print count like original method does
+          if (!printBillActionTriggered) {
+            const count = order.nb_print ? order.nb_print + 1 : 1;
+            if (order.isSynced) {
+              const wasDirty = order.isDirty();
+              await this.data.write("pos.order", [order.id], {
+                nb_print: count,
+              });
+              if (!wasDirty) {
+                order._dirty = false;
+              }
+            } else {
+              order.nb_print = count;
+            }
+          } else if (!order.nb_print) {
+            order.nb_print = 0;
+          }
+
+          return { successful: true };
+        }
+      } catch (error) {
+        console.error("QZ Printing failed, falling back to default:", error);
       }
-
-      // 2. Prepare the HTML for QZ
-      // We wrap it in standard HTML tags and add basic width styling
-      const htmlContent = `
-                <html>
-                <head>
-                    <style>
-                        body { 
-                            font-family: 'Inconsolata'; 
-                            font-size: 14px;
-                            width: 300px; /* Standard thermal width */
-                            margin: 0;
-                        }
-                        .pos-receipt {
-                            width: 100%;
-                        }
-                        img { max-width: 100%; }
-                        .pos-receipt-container { text-align: center; }
-                    </style>
-                </head>
-                <body>
-                    ${receiptElement.innerHTML}
-                </body>
-                </html>
-            `;
-
-      // 3. Send to Printer via QZ
-      // Ensure we are connected before asking for printers
-      await this.qz.connect();
-
-      // Get QZ library from window
-      const qzLib = this.qz.getQZ();
-
-      if (!qzLib) {
-        console.warn("QZ Library not loaded, falling back to browser print.");
-        return super.printReceipt();
-      }
-
-      const printerName = await qzLib.printers.getDefault();
-
-      console.log(`QZ: Printing POS receipt to ${printerName}...`);
-      await this.qz.print(printerName, htmlContent, "pixel");
-
-      return true;
-    } catch (error) {
-      console.error("QZ Printing Failed:", error);
-      // If QZ fails, fallback to the standard browser print so the user isn't stuck
-      return super.printReceipt();
     }
+
+    // Fallback to original Odoo printing
+    return super.printReceipt({ basic, order, printBillActionTriggered });
   },
 });
