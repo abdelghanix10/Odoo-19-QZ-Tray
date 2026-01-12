@@ -1,5 +1,4 @@
 'use strict';
-console.log("Loading QZ Tray Library...");
 
 
 /**
@@ -2624,7 +2623,6 @@ window.qz = (function () {
                 if (_qz.tools.versionCompare(2, 2, 2) < 0) {
                     return _qz.tools.promise(function (resolve, reject) {
                         _qz.websocket.dataPromise('networking.device', { hostname: hostname, port: port }).then(function (device) {
-                            console.log(device);
                             resolve(device.hostname);
                         });
                     });
@@ -2850,7 +2848,4 @@ window.qz = (function () {
 
     return qz;
 })();
-
-// End of QZ Tray Library
-console.log("QZ Tray Library Loaded to window.qz");
 

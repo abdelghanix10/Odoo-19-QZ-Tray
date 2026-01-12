@@ -58,7 +58,6 @@ patch(PosStore.prototype, {
 
           // Get default printer and print
           const printerName = await qzLib.printers.getDefault();
-          console.log(`QZ: Printing POS receipt to ${printerName}...`);
           await qzService.print(printerName, htmlContent, "pixel");
 
           // Update print count like original method does
@@ -82,7 +81,6 @@ patch(PosStore.prototype, {
           return { successful: true };
         }
       } catch (error) {
-        console.error("QZ Printing failed, falling back to default:", error);
       }
     }
 

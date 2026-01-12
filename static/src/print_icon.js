@@ -21,7 +21,6 @@ export class QzPrintIcon extends Component {
       }
 
       const defaultPrinter = await qzLib.printers.getDefault();
-      console.log("Printing to:", defaultPrinter);
 
       // 3. Define simple HTML content to print
       const htmlContent = `
@@ -37,9 +36,7 @@ export class QzPrintIcon extends Component {
 
       // 4. Send to printer
       await this.qz.print(defaultPrinter, htmlContent, "pixel");
-    } catch (error) {
-      console.error("QZ Print Error:", error);
-    }
+    } catch (error) {}
   }
 }
 

@@ -14,15 +14,6 @@ export const qzTrayService = {
       return null;
     };
 
-    // Log QZ availability on service start
-    if (getQZ()) {
-      console.log("QZ Tray service started - library available");
-    } else {
-      console.warn(
-        "QZ Tray service started - library NOT yet available (will wait on connect)"
-      );
-    }
-
     // Wait for QZ to be available (in case of async loading)
     const waitForQZ = async (timeout = 5000) => {
       const startTime = Date.now();
@@ -49,9 +40,7 @@ export const qzTrayService = {
       try {
         await qz.websocket.connect();
         isConnected = true;
-        console.log("Connected to QZ Tray");
       } catch (e) {
-        console.error("QZ Tray Connection Error:", e);
         throw e;
       }
     };
@@ -82,9 +71,7 @@ export const qzTrayService = {
         ];
 
         await qz.print(config, printData);
-        console.log("Print Sent to " + printerName);
       } catch (e) {
-        console.error("Printing failed", e);
         throw e;
       }
     };
