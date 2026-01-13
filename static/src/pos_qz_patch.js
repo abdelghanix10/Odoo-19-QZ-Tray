@@ -34,27 +34,7 @@ patch(PosStore.prototype, {
           );
 
           // Wrap in proper HTML document for printing
-          const htmlContent = `
-            <html>
-            <head>
-              <style>
-                body { 
-                  font-family: 'Inconsolata', monospace; 
-                  font-size: 12px;
-                  width: 280px;
-                  margin: 0;
-                  padding: 10px;
-                }
-                .pos-receipt { width: 100%; }
-                img { max-width: 100%; }
-                table { width: 100%; }
-              </style>
-            </head>
-            <body>
-              ${receiptHtml.outerHTML}
-            </body>
-            </html>
-          `;
+          const htmlContent = receiptHtml.outerHTML;
 
           // Get default printer and print
           const printerName = await qzLib.printers.getDefault();
