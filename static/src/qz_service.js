@@ -5,6 +5,7 @@ import { registry } from "@web/core/registry";
 export const qzTrayService = {
   async start(env) {
     let isConnected = false;
+    let securityConfigured = false;
 
     // Get QZ from window - it should be loaded by qz-tray.js before this module
     const getQZ = () => {
@@ -23,6 +24,53 @@ export const qzTrayService = {
       return getQZ();
     };
 
+    // Configure QZ Tray security (certificate and signing)
+    const configureSecurity = (qz) => {
+      if (securityConfigured) {
+        return;
+      }
+
+      // Note: QZ Tray 2.2.x defaults to SHA1 for signing
+      // Our server-side uses SHA1 as well, so no need to change algorithm
+
+      // Set certificate promise - fetches the public certificate from Odoo
+      qz.security.setCertificatePromise(function (resolve, reject) {
+        fetch("/qz/certificate")
+          .then((response) => {
+            if (!response.ok) {
+              throw new Error(`Certificate fetch failed: ${response.status}`);
+            }
+            return response.text();
+          })
+          .then(resolve)
+          .catch(reject);
+      });
+
+      // Set signature promise - signs authentication requests via Odoo
+      qz.security.setSignaturePromise(function (toSign) {
+        return function (resolve, reject) {
+          fetch("/qz/sign", {
+            method: "POST",
+            headers: {
+              "Content-Type": "text/plain",
+            },
+            body: toSign,
+          })
+            .then((response) => {
+              if (!response.ok) {
+                throw new Error(`Signing failed: ${response.status}`);
+              }
+              return response.text();
+            })
+            .then(resolve)
+            .catch(reject);
+        };
+      });
+
+      securityConfigured = true;
+      console.log("QZ Tray security configured successfully");
+    };
+
     // Function to connect to QZ Tray
     const connect = async () => {
       const qz = await waitForQZ();
@@ -33,6 +81,9 @@ export const qzTrayService = {
         );
       }
 
+      // Configure security before connecting
+      configureSecurity(qz);
+
       if (isConnected && qz.websocket.isActive()) {
         return;
       }
@@ -40,7 +91,9 @@ export const qzTrayService = {
       try {
         await qz.websocket.connect();
         isConnected = true;
+        console.log("QZ Tray connected successfully");
       } catch (e) {
+        console.error("QZ Tray connection error:", e);
         throw e;
       }
     };
