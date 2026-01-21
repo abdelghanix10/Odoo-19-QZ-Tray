@@ -34,7 +34,44 @@ patch(PosStore.prototype, {
           );
 
           // Wrap in proper HTML document for printing
-          const htmlContent = receiptHtml.outerHTML;
+          const htmlContent = `<html>
+          <head>
+            <style>
+              @font-face {
+                  font-family: "DejaVu Sans Mono";
+                  src: url("/odoo_qz_print/static/ttf/DejaVuSansMono.ttf") format("truetype");
+                  font-weight: normal;
+                  font-style: normal;
+              }
+              @font-face {
+                  font-family: "DejaVu Sans Mono";
+                  src: url("/odoo_qz_print/static/ttf/DejaVuSansMono-Bold.ttf") format("truetype");
+                  font-weight: bold;
+                  font-style: normal;
+              }
+              @font-face {
+                  font-family: "DejaVu Sans Mono";
+                  src: url("/odoo_qz_print/static/ttf/DejaVuSansMono-Oblique.ttf") format("truetype");
+                  font-weight: normal;
+                  font-style: italic;
+              }
+              @font-face {
+                  font-family: "DejaVu Sans Mono";
+                  src: url("/odoo_qz_print/static/ttf/DejaVuSansMono-BoldOblique.ttf") format("truetype");
+                  font-weight: bold;
+                  font-style: italic;
+              }
+              * {
+                  font-family: "DejaVu Sans Mono", monospace;
+              }
+              table {
+                  table-layout: fixed;
+                  width: 100%;
+              }
+            </style>
+          </head>
+          <body>${receiptHtml.outerHTML}</body>
+          </html>`;
 
           // Get default printer and print
           const printerName = await qzLib.printers.getDefault();
