@@ -77,7 +77,7 @@ export const qzTrayService = {
 
       if (!qz) {
         throw new Error(
-          "QZ Tray library not loaded. Make sure qz-tray.js is included in assets."
+          "QZ Tray library not loaded. Make sure qz-tray.js is included in assets.",
         );
       }
 
@@ -99,7 +99,7 @@ export const qzTrayService = {
     };
 
     // Function to print ZPL, HTML, or PDF
-    const print = async (printerName, data, type = "pixel") => {
+    const print = async (printerName, data, type = "pixel", options = {}) => {
       const qz = getQZ();
       if (!qz) {
         throw new Error("QZ Tray library not loaded.");
@@ -108,7 +108,10 @@ export const qzTrayService = {
       await connect();
 
       try {
-        const config = qz.configs.create(printerName);
+        const config = qz.configs.create(printerName, {
+          scaleContent: false,
+          ...options,
+        });
 
         // Example data payload structure
         // For PDF (base64): type='pixel', format='pdf', flavor='base64'

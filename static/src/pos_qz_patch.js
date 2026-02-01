@@ -30,7 +30,7 @@ patch(PosStore.prototype, {
               order,
               basic_receipt: basic,
             },
-            { addClass: "pos-receipt-print" }
+            { addClass: "pos-receipt-print" },
           );
 
           // Wrap in proper HTML document for printing
@@ -97,8 +97,7 @@ patch(PosStore.prototype, {
 
           return { successful: true };
         }
-      } catch (error) {
-      }
+      } catch (error) {}
     }
 
     // Fallback to original Odoo printing
