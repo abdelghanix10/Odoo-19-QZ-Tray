@@ -4,26 +4,26 @@ import { PosStore } from "@point_of_sale/app/services/pos_store";
 import { patch } from "@web/core/utils/patch";
 import { OrderReceipt } from "@point_of_sale/app/screens/receipt_screen/receipt/order_receipt";
 
+// متغير خارجي لحفظ اسم الطابعة حتى لا نبحث عنها كل مرة
+let cachedPrinterName = null;
+
 patch(PosStore.prototype, {
   async printReceipt({
     basic = false,
     order = this.getOrder(),
     printBillActionTriggered = false,
   } = {}) {
-    // Try QZ Tray first
     const qzService = this.env.services.qz_tray;
 
     if (qzService) {
       try {
-        // Connect to QZ Tray
         await qzService.connect();
-
         const qzLib = qzService.getQZ();
+
         if (qzLib) {
-          // Get the renderer service from env
           const renderer = this.env.services.renderer;
 
-          // Render receipt to HTML using Odoo's renderer
+          // تحويل الفاتورة لـ HTML
           const receiptHtml = await renderer.toHtml(
             OrderReceipt,
             {
@@ -33,51 +33,38 @@ patch(PosStore.prototype, {
             { addClass: "pos-receipt-print" },
           );
 
-          // Wrap in proper HTML document for printing
+          // تعديل: استخدام خطوط النظام (Monospace) بدلاً من تحميل خطوط من السيرفر لتسريع العملية
           const htmlContent = `<html>
           <head>
             <style>
-              @font-face {
-                  font-family: "DejaVu Sans Mono";
-                  src: url("/odoo_qz_print/static/ttf/DejaVuSansMono.ttf") format("truetype");
-                  font-weight: normal;
-                  font-style: normal;
-              }
-              @font-face {
-                  font-family: "DejaVu Sans Mono";
-                  src: url("/odoo_qz_print/static/ttf/DejaVuSansMono-Bold.ttf") format("truetype");
+              body {
+                  font-family: "Courier New", Courier, monospace; 
                   font-weight: bold;
-                  font-style: normal;
-              }
-              @font-face {
-                  font-family: "DejaVu Sans Mono";
-                  src: url("/odoo_qz_print/static/ttf/DejaVuSansMono-Oblique.ttf") format("truetype");
-                  font-weight: normal;
-                  font-style: italic;
-              }
-              @font-face {
-                  font-family: "DejaVu Sans Mono";
-                  src: url("/odoo_qz_print/static/ttf/DejaVuSansMono-BoldOblique.ttf") format("truetype");
-                  font-weight: bold;
-                  font-style: italic;
-              }
-              * {
-                  font-family: "DejaVu Sans Mono", monospace;
               }
               table {
                   table-layout: fixed;
                   width: 100%;
+              }
+              .pos-receipt-print {
+                  font-size: 14px; /* حجم خط مناسب للطابعات الحرارية */
               }
             </style>
           </head>
           <body>${receiptHtml.outerHTML}</body>
           </html>`;
 
-          // Get default printer and print
-          const printerName = await qzLib.printers.getDefault();
-          await qzService.print(printerName, htmlContent, "pixel");
+          // تعديل: جلب الطابعة مرة واحدة فقط وحفظها
+          if (!cachedPrinterName) {
+            // يمكنك هنا وضع اسم الطابعة يدوياً إذا أردت سرعة قصوى
+            // cachedPrinterName = "اسم الطابعة في الويندوز";
+            cachedPrinterName = await qzLib.printers.getDefault();
+            console.log("Printer cached:", cachedPrinterName);
+          }
 
-          // Update print count like original method does
+          // الطباعة باستخدام الاسم المحفوظ
+          await qzService.print(cachedPrinterName, htmlContent, "pixel");
+
+          // تحديث عداد الطباعة (نفس كود أودو الأصلي)
           if (!printBillActionTriggered) {
             const count = order.nb_print ? order.nb_print + 1 : 1;
             if (order.isSynced) {
@@ -97,10 +84,11 @@ patch(PosStore.prototype, {
 
           return { successful: true };
         }
-      } catch (error) {}
+      } catch (error) {
+        console.error("QZ Print Error:", error);
+      }
     }
 
-    // Fallback to original Odoo printing
     return super.printReceipt({ basic, order, printBillActionTriggered });
   },
 });
