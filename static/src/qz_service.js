@@ -89,7 +89,15 @@ export const qzTrayService = {
       }
 
       try {
-        await qz.websocket.connect();
+        await qz.websocket.connect({
+          host: "localhost",
+          port: {
+            secure: [8181, 8282, 8383, 8484], // Secure ports only
+            insecure: [],                      // Leave empty to block ws://
+          },
+          usingSecure: true,                   // Force wss://
+          keepAlive: 60,
+        });
         isConnected = true;
         console.log("QZ Tray connected successfully");
       } catch (e) {

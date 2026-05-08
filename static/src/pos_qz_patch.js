@@ -14,8 +14,9 @@ patch(PosStore.prototype, {
     printBillActionTriggered = false,
   } = {}) {
     const qzService = this.env.services.qz_tray;
+    const printMethod = this.config?.receipt_print_method || "chrome";
 
-    if (qzService) {
+    if (qzService && printMethod === "qz_tray") {
       try {
         await qzService.connect();
         const qzLib = qzService.getQZ();
