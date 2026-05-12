@@ -62,8 +62,8 @@ patch(PosStore.prototype, {
             console.log("Printer cached:", cachedPrinterName);
           }
 
-          // الطباعة باستخدام الاسم المحفوظ
-          await qzService.print(cachedPrinterName, htmlContent, "pixel");
+          // Print using cached name — skipConnect=true because we already connected above
+          await qzService.print(cachedPrinterName, htmlContent, "pixel", {}, true);
 
           // تحديث عداد الطباعة (نفس كود أودو الأصلي)
           if (!printBillActionTriggered) {

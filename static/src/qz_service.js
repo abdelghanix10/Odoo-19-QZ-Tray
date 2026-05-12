@@ -107,13 +107,16 @@ export const qzTrayService = {
     };
 
     // Function to print ZPL, HTML, or PDF
-    const print = async (printerName, data, type = "pixel", options = {}) => {
+    const print = async (printerName, data, type = "pixel", options = {}, skipConnect = false) => {
       const qz = getQZ();
       if (!qz) {
         throw new Error("QZ Tray library not loaded.");
       }
 
-      await connect();
+      // Only connect if not already confirmed connected by caller
+      if (!skipConnect) {
+        await connect();
+      }
 
       try {
         const config = qz.configs.create(printerName, {
