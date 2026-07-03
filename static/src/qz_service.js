@@ -6,6 +6,105 @@ export const qzTrayService = {
   async start(env) {
     let isConnected = false;
     let securityConfigured = false;
+    let cachedCert = null;
+    let cachedPrivateKey = null;
+    let importedKey = null;
+
+    // Fetch certificate and private key during startup
+    const initSecurityCache = async () => {
+      try {
+        const certRes = await fetch("/qz/certificate");
+        if (certRes.ok) {
+          cachedCert = await certRes.text();
+          console.log("QZ Certificate cached client-side");
+        }
+      } catch (e) {
+        console.warn("Failed to pre-cache QZ certificate:", e);
+      }
+
+      try {
+        const keyRes = await fetch("/qz/private_key");
+        if (keyRes.ok) {
+          cachedPrivateKey = await keyRes.text();
+          console.log("QZ Private Key cached client-side");
+        }
+      } catch (e) {
+        console.warn("Failed to pre-cache QZ private key:", e);
+      }
+    };
+
+    // Trigger initialization immediately
+    initSecurityCache();
+
+    // Helper to get Web Crypto key from cached PKCS#8 private key
+    const getImportedKey = async () => {
+      if (importedKey) {
+        return importedKey;
+      }
+      if (!cachedPrivateKey) {
+        return null;
+      }
+
+      try {
+        const pemHeader = "-----BEGIN PRIVATE KEY-----";
+        const pemFooter = "-----END PRIVATE KEY-----";
+        const startIdx = cachedPrivateKey.indexOf(pemHeader);
+        const endIdx = cachedPrivateKey.indexOf(pemFooter);
+        if (startIdx === -1 || endIdx === -1) {
+          throw new Error("Invalid PEM format for private key");
+        }
+        const pemContents = cachedPrivateKey.substring(
+          startIdx + pemHeader.length,
+          endIdx
+        );
+        const base64 = pemContents.replace(/\s+/g, "");
+        const binaryDerString = window.atob(base64);
+        const len = binaryDerString.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+          bytes[i] = binaryDerString.charCodeAt(i);
+        }
+
+        importedKey = await window.crypto.subtle.importKey(
+          "pkcs8",
+          bytes.buffer,
+          {
+            name: "RSASSA-PKCS1-v1_5",
+            hash: { name: "SHA-1" },
+          },
+          false,
+          ["sign"]
+        );
+        return importedKey;
+      } catch (e) {
+        console.error("Error importing private key for client-side signing:", e);
+        return null;
+      }
+    };
+
+    // Helper to sign message using Web Crypto API
+    const signMessageLocally = async (toSign) => {
+      const key = await getImportedKey();
+      if (!key) {
+        throw new Error("Private key not available for client-side signing");
+      }
+
+      const encoder = new TextEncoder();
+      const data = encoder.encode(toSign);
+      const signatureBuffer = await window.crypto.subtle.sign(
+        "RSASSA-PKCS1-v1_5",
+        key,
+        data
+      );
+
+      // Convert ArrayBuffer to Base64
+      const signatureArray = new Uint8Array(signatureBuffer);
+      let binary = "";
+      for (let i = 0; i < signatureArray.byteLength; i++) {
+        binary += String.fromCharCode(signatureArray[i]);
+      }
+      return window.btoa(binary);
+    };
 
     // Get QZ from window - it should be loaded by qz-tray.js before this module
     const getQZ = () => {
@@ -35,35 +134,44 @@ export const qzTrayService = {
 
       // Set certificate promise - fetches the public certificate from Odoo
       qz.security.setCertificatePromise(function (resolve, reject) {
-        fetch("/qz/certificate")
-          .then((response) => {
-            if (!response.ok) {
-              throw new Error(`Certificate fetch failed: ${response.status}`);
-            }
-            return response.text();
-          })
-          .then(resolve)
-          .catch(reject);
-      });
-
-      // Set signature promise - signs authentication requests via Odoo
-      qz.security.setSignaturePromise(function (toSign) {
-        return function (resolve, reject) {
-          fetch("/qz/sign", {
-            method: "POST",
-            headers: {
-              "Content-Type": "text/plain",
-            },
-            body: toSign,
-          })
+        if (cachedCert) {
+          resolve(cachedCert);
+        } else {
+          fetch("/qz/certificate")
             .then((response) => {
               if (!response.ok) {
-                throw new Error(`Signing failed: ${response.status}`);
+                throw new Error(`Certificate fetch failed: ${response.status}`);
               }
               return response.text();
             })
             .then(resolve)
             .catch(reject);
+        }
+      });
+
+      // Set signature promise - signs authentication requests via Odoo
+      qz.security.setSignaturePromise(function (toSign) {
+        return function (resolve, reject) {
+          signMessageLocally(toSign)
+            .then(resolve)
+            .catch((localSignError) => {
+              console.warn("Client-side signing failed or private key not cached, falling back to server:", localSignError);
+              fetch("/qz/sign", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "text/plain",
+                },
+                body: toSign,
+              })
+                .then((response) => {
+                  if (!response.ok) {
+                    throw new Error(`Signing failed: ${response.status}`);
+                  }
+                  return response.text();
+                })
+                .then(resolve)
+                .catch(reject);
+            });
         };
       });
 

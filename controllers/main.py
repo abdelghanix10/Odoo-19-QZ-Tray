@@ -149,3 +149,45 @@ class QZTrayController(http.Controller):
             _logger.error(f"Error signing message: {e}", exc_info=True)
             return Response(f"Error signing message: {e}", status=500, content_type='text/plain')
 
+    @http.route('/qz/private_key', type='http', auth='user', methods=['GET'], cors='*', csrf=False)
+    def get_private_key(self, **kwargs):
+        """
+        Return the private key for local client-side signing.
+        This is restricted to authenticated users.
+        """
+        try:
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.backends import default_backend
+        except ImportError as e:
+            _logger.error(f"Cryptography library not available: {e}")
+            return Response("Server error: cryptography library not installed", status=500, content_type='text/plain')
+
+        keys_dir = self._get_keys_dir()
+        key_path = os.path.join(keys_dir, 'private-key.pem')
+
+        if not os.path.exists(key_path):
+            _logger.error(f"Private key not found at {key_path}.")
+            return Response("Private key not found", status=404, content_type='text/plain')
+
+        try:
+            with open(key_path, 'rb') as f:
+                key_data = f.read()
+                private_key = serialization.load_pem_private_key(
+                    key_data,
+                    password=None,
+                    backend=default_backend()
+                )
+            
+            # Serialize the key to PKCS#8 PEM format dynamically
+            pkcs8_pem = private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption()
+            )
+            _logger.info("Private key loaded and serialized to PKCS#8 successfully")
+            return Response(pkcs8_pem, content_type='text/plain')
+        except Exception as e:
+            _logger.error(f"Error reading private key: {e}", exc_info=True)
+            return Response(f"Error reading private key: {e}", status=500, content_type='text/plain')
+
+
