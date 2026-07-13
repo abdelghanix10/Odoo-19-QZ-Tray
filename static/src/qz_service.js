@@ -2,41 +2,88 @@
 
 import { registry } from "@web/core/registry";
 
+const CONNECT_TIMEOUT_MS = 5000;
+const PRINT_TIMEOUT_MS = 10000;
+const PRINTER_TIMEOUT_MS = 5000;
+const HEARTBEAT_INTERVAL_MS = 60000;
+const LOG_PREFIX = "[QZ]";
+
+function ts() {
+  return new Date().toISOString().substring(11, 23);
+}
+
+function log(...args) {
+  console.log(LOG_PREFIX, `[${ts()}]`, ...args);
+}
+
+function warn(...args) {
+  console.warn(LOG_PREFIX, `[${ts()}]`, ...args);
+}
+
+function error(...args) {
+  console.error(LOG_PREFIX, `[${ts()}]`, ...args);
+}
+
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${ms}ms`)),
+      ms
+    );
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 export const qzTrayService = {
   async start(env) {
-    let isConnected = false;
+    // --- State ---
     let securityConfigured = false;
     let cachedCert = null;
     let cachedPrivateKey = null;
     let importedKey = null;
+    let cachedPrinterName = null;
+    let reconnectPromise = null; // coalesce concurrent reconnects
+    let heartbeatTimer = null;
+    let printingInProgress = false; // guard heartbeat during print
+    let destroyed = false;
 
-    // Fetch certificate and private key during startup
+    // --- Security cache initialization ---
+
     const initSecurityCache = async () => {
       try {
         const certRes = await fetch("/qz/certificate");
         if (certRes.ok) {
           cachedCert = await certRes.text();
-          console.log("QZ Certificate cached client-side");
+          log("Certificate cached client-side");
         }
       } catch (e) {
-        console.warn("Failed to pre-cache QZ certificate:", e);
+        warn("Failed to pre-cache QZ certificate:", e);
       }
 
       try {
         const keyRes = await fetch("/qz/private_key");
         if (keyRes.ok) {
           cachedPrivateKey = await keyRes.text();
-          console.log("QZ Private Key cached client-side");
+          log("Private Key cached client-side");
         }
       } catch (e) {
-        console.warn("Failed to pre-cache QZ private key:", e);
+        warn("Failed to pre-cache QZ private key:", e);
       }
     };
 
-    // Trigger initialization immediately
     initSecurityCache();
 
-    // Helper to get Web Crypto key from cached PKCS#8 private key
+    // --- Crypto helpers ---
+
     const getImportedKey = async () => {
       if (importedKey) {
         return importedKey;
@@ -77,12 +124,11 @@ export const qzTrayService = {
         );
         return importedKey;
       } catch (e) {
-        console.error("Error importing private key for client-side signing:", e);
+        error("Error importing private key for client-side signing:", e);
         return null;
       }
     };
 
-    // Helper to sign message using Web Crypto API
     const signMessageLocally = async (toSign) => {
       const key = await getImportedKey();
       if (!key) {
@@ -97,7 +143,6 @@ export const qzTrayService = {
         data
       );
 
-      // Convert ArrayBuffer to Base64
       const signatureArray = new Uint8Array(signatureBuffer);
       let binary = "";
       for (let i = 0; i < signatureArray.byteLength; i++) {
@@ -106,7 +151,8 @@ export const qzTrayService = {
       return window.btoa(binary);
     };
 
-    // Get QZ from window - it should be loaded by qz-tray.js before this module
+    // --- QZ accessors ---
+
     const getQZ = () => {
       if (typeof window !== "undefined" && window.qz) {
         return window.qz;
@@ -114,7 +160,6 @@ export const qzTrayService = {
       return null;
     };
 
-    // Wait for QZ to be available (in case of async loading)
     const waitForQZ = async (timeout = 5000) => {
       const startTime = Date.now();
       while (!getQZ() && Date.now() - startTime < timeout) {
@@ -123,16 +168,13 @@ export const qzTrayService = {
       return getQZ();
     };
 
-    // Configure QZ Tray security (certificate and signing)
+    // --- Security configuration ---
+
     const configureSecurity = (qz) => {
       if (securityConfigured) {
         return;
       }
 
-      // Note: QZ Tray 2.2.x defaults to SHA1 for signing
-      // Our server-side uses SHA1 as well, so no need to change algorithm
-
-      // Set certificate promise - fetches the public certificate from Odoo
       qz.security.setCertificatePromise(function (resolve, reject) {
         if (cachedCert) {
           resolve(cachedCert);
@@ -149,18 +191,18 @@ export const qzTrayService = {
         }
       });
 
-      // Set signature promise - signs authentication requests via Odoo
       qz.security.setSignaturePromise(function (toSign) {
         return function (resolve, reject) {
           signMessageLocally(toSign)
             .then(resolve)
             .catch((localSignError) => {
-              console.warn("Client-side signing failed or private key not cached, falling back to server:", localSignError);
+              warn(
+                "Client-side signing failed, falling back to server:",
+                localSignError
+              );
               fetch("/qz/sign", {
                 method: "POST",
-                headers: {
-                  "Content-Type": "text/plain",
-                },
+                headers: { "Content-Type": "text/plain" },
                 body: toSign,
               })
                 .then((response) => {
@@ -176,95 +218,363 @@ export const qzTrayService = {
       });
 
       securityConfigured = true;
-      console.log("QZ Tray security configured successfully");
+      log("Security configured successfully");
     };
 
-    // Function to connect to QZ Tray
+    // --- Connection management ---
+
+    const safeDisconnect = async (reason = "unspecified") => {
+      const qz = getQZ();
+      if (!qz) return;
+
+      try {
+        await qz.websocket.disconnect();
+        log("Disconnected — reason:", reason);
+      } catch (e) {
+        warn("Disconnect error (ignored) — reason:", reason, "—", e.message || e);
+      }
+    };
+
     const connect = async () => {
       const qz = await waitForQZ();
-
       if (!qz) {
         throw new Error(
-          "QZ Tray library not loaded. Make sure qz-tray.js is included in assets.",
+          "QZ Tray library not loaded. Make sure qz-tray.js is included in assets."
         );
       }
 
-      // Configure security before connecting
       configureSecurity(qz);
 
-      if (isConnected && qz.websocket.isActive()) {
+      const t0 = Date.now();
+      try {
+        await withTimeout(
+          qz.websocket.connect({
+            host: "localhost",
+            port: {
+              secure: [8181],
+              insecure: [],
+            },
+            usingSecure: true,
+            keepAlive: 60,
+          }),
+          CONNECT_TIMEOUT_MS,
+          "QZ websocket connect"
+        );
+      } catch (e) {
+        const msg = (e.message || String(e)).toLowerCase();
+        // "Already connected" / "already exists" are not errors — treat as success
+        if (msg.includes("already connected") || msg.includes("already exists")) {
+          log("Already connected (treated as success)");
+          return;
+        }
+        // Connect failed — ensure no half-open socket
+        warn("Connect failed, cleaning up —", e.message);
+        await safeDisconnect("connect failure cleanup");
+        throw e;
+      }
+
+      log("Connected — took", Date.now() - t0, "ms");
+    };
+
+    /**
+     * Coalesced reconnect — only one reconnect runs at a time.
+     * Concurrent callers await the same promise.
+     */
+    const reconnect = async (reason = "unspecified") => {
+      if (reconnectPromise) {
+        log("Reconnect already in progress — coalescing (reason:", reason, ")");
+        return reconnectPromise;
+      }
+
+      reconnectPromise = (async () => {
+        const t0 = Date.now();
+        log("Reconnecting — reason:", reason);
+
+        try {
+          await safeDisconnect("reconnect: " + reason);
+          await connect();
+
+          if (!getQZ()?.websocket.isActive()) {
+            throw new Error("Websocket still inactive after reconnect");
+          }
+
+          // Invalidate cached printer after reconnect — it may reference stale state
+          cachedPrinterName = null;
+          log("Reconnect successful — took", Date.now() - t0, "ms");
+        } catch (e) {
+          error("Reconnect failed — took", Date.now() - t0, "ms —", e.message);
+          throw e;
+        } finally {
+          reconnectPromise = null;
+        }
+      })();
+
+      return reconnectPromise;
+    };
+
+    /**
+     * Single source of truth for connection state.
+     */
+    const ensureConnected = async (reason = "unspecified") => {
+      const qz = getQZ();
+      if (!qz) {
+        throw new Error("QZ Tray library not loaded.");
+      }
+
+      if (qz.websocket.isActive()) {
         return;
       }
 
+      log("Websocket inactive — triggering reconnect (reason:", reason, ")");
+      await reconnect(reason);
+    };
+
+    // --- Error classification ---
+
+    const isConnectionError = (err) => {
+      const msg = (err && err.message || String(err)).toLowerCase();
+      return (
+        msg.includes("websocket closed") ||
+        msg.includes("connection lost") ||
+        msg.includes("already connected") ||
+        msg.includes("already exists") ||
+        msg.includes("connection refused") ||
+        msg.includes("not connected") ||
+        msg.includes("connection timed out") ||
+        msg.includes("failed to connect") ||
+        msg.includes("broken pipe") ||
+        msg.includes("networkerror") ||
+        msg.includes("aborterror")
+      );
+    };
+
+    // --- Printer management ---
+
+    const getDefaultPrinter = async () => {
+      if (cachedPrinterName) {
+        return cachedPrinterName;
+      }
+
+      const fetchPrinter = async () => {
+        const qz = getQZ();
+        return await withTimeout(
+          qz.printers.getDefault(),
+          PRINTER_TIMEOUT_MS,
+          "getDefaultPrinter"
+        );
+      };
+
       try {
-        await qz.websocket.connect({
-          host: "localhost",
-          port: {
-            secure: [8181], // QZ Tray WSS port (confirmed active)
-            insecure: [],   // Leave empty to block ws://
-          },
-          usingSecure: true, // Force wss://
-          keepAlive: 60,
-        });
-        isConnected = true;
-        console.log("QZ Tray connected successfully");
+        await ensureConnected("getDefaultPrinter");
+        cachedPrinterName = await fetchPrinter();
+        log("Default printer resolved:", cachedPrinterName);
+        return cachedPrinterName;
       } catch (e) {
-        console.error("QZ Tray connection error:", e);
-        throw e;
+        // If printer fetch failed, reconnect and retry once
+        warn("getDefaultPrinter failed, reconnecting and retrying —", e.message);
+        cachedPrinterName = null;
+        await reconnect("getDefaultPrinter failure");
+        cachedPrinterName = await fetchPrinter();
+        log("Default printer resolved (after retry):", cachedPrinterName);
+        return cachedPrinterName;
       }
     };
 
-    // Function to print ZPL, HTML, or PDF
-    const print = async (printerName, data, type = "pixel", options = {}, skipConnect = false) => {
+    // --- Print with retry ---
+
+    const executePrint = async (printerName, data, type, options) => {
+      const qz = getQZ();
+      const config = qz.configs.create(printerName, {
+        scaleContent: false,
+        ...options,
+      });
+
+      const printData = [
+        {
+          type: type,
+          format: type === "pixel" ? "html" : "command",
+          flavor: type === "pixel" ? "plain" : "plain",
+          data: data,
+        },
+      ];
+
+      await withTimeout(
+        qz.print(config, printData),
+        PRINT_TIMEOUT_MS,
+        "QZ print"
+      );
+    };
+
+    const print = async (printerName, data, type = "pixel", options = {}) => {
       const qz = getQZ();
       if (!qz) {
         throw new Error("QZ Tray library not loaded.");
       }
 
-      // Only connect if not already confirmed connected by caller
-      if (!skipConnect) {
-        await connect();
-      }
+      const t0 = Date.now();
+      printingInProgress = true;
 
       try {
-        const config = qz.configs.create(printerName, {
-          scaleContent: false,
-          ...options,
-        });
+        // Attempt 1
+        try {
+          await ensureConnected("print:attempt1");
+          await executePrint(printerName, data, type, options);
+          return;
+        } catch (firstErr) {
+          warn("Print attempt 1 failed —", firstErr.message || firstErr);
 
-        // Example data payload structure
-        // For PDF (base64): type='pixel', format='pdf', flavor='base64'
-        // For Raw (ZPL/ESCP): type='raw', format='command', flavor='plain'
+          if (!isConnectionError(firstErr)) {
+            error("Print failed (non-connection error):", firstErr);
+            throw firstErr;
+          }
+        }
 
-        const printData = [
-          {
-            type: type,
-            format: type === "pixel" ? "html" : "command",
-            flavor: type === "pixel" ? "plain" : "plain",
-            data: data,
-          },
-        ];
+        // Connection error — force reconnect and retry once
+        warn("Print attempt 1 connection error — reconnecting for retry");
 
-        await qz.print(config, printData);
-      } catch (e) {
-        throw e;
+        try {
+          await reconnect("print:retry");
+          await executePrint(printerName, data, type, options);
+          log("Print retry succeeded — took", Date.now() - t0, "ms");
+        } catch (retryErr) {
+          error(
+            "Print retry failed — gave up after",
+            Date.now() - t0,
+            "ms —",
+            retryErr
+          );
+          throw retryErr;
+        }
+      } finally {
+        printingInProgress = false;
       }
     };
 
-    // Function to list printers (useful for configuration)
-    const getPrinters = async () => {
+    // --- Heartbeat ---
+
+    const startHeartbeat = () => {
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+      }
+
+      heartbeatTimer = setInterval(async () => {
+        if (destroyed || printingInProgress) {
+          return; // skip during active print or after destroy
+        }
+
+        const qz = getQZ();
+        if (!qz) {
+          return;
+        }
+
+        if (!qz.websocket.isActive()) {
+          warn("Heartbeat: websocket inactive — triggering reconnect");
+          try {
+            await reconnect("heartbeat:inactive");
+          } catch (e) {
+            error("Heartbeat reconnect failed:", e.message);
+          }
+          return;
+        }
+
+        // Active probe — try a lightweight call
+        try {
+          await withTimeout(
+            qz.printers.getDefault(),
+            PRINTER_TIMEOUT_MS,
+            "Heartbeat probe"
+          );
+          // Success — connection is alive, invalidate cached printer in case it changed
+        } catch (e) {
+          warn(
+            "Heartbeat probe failed — websocket claims active but probe failed:",
+            e.message
+          );
+          try {
+            await reconnect("heartbeat:probe-failed");
+          } catch (reconnErr) {
+            error("Heartbeat reconnect failed:", reconnErr.message);
+          }
+        }
+      }, HEARTBEAT_INTERVAL_MS);
+
+      log("Heartbeat started — interval:", HEARTBEAT_INTERVAL_MS, "ms");
+    };
+
+    const stopHeartbeat = () => {
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+        log("Heartbeat stopped");
+      }
+    };
+
+    // --- WebSocket close callback ---
+
+    const registerCloseCallback = () => {
       const qz = getQZ();
-      if (!qz) {
-        throw new Error("QZ Tray library not loaded.");
+      if (!qz?.websocket?.setClosedCallbacks) {
+        log("WebSocket close callbacks not supported by QZ Tray version");
+        return;
       }
-      await connect();
-      return await qz.printers.find();
+
+      qz.websocket.setClosedCallbacks(function (data) {
+        warn("WebSocket closed callback fired:", data);
+        cachedPrinterName = null;
+        // Don't reconnect here — let the next print or heartbeat trigger it.
+        // Reconnecting inside a callback can race with QZ internal state.
+      });
+
+      log("WebSocket close callback registered");
     };
+
+    // --- Browser lifecycle recovery ---
+
+    const registerBrowserLifecycle = () => {
+      const recover = async (event) => {
+        if (destroyed) return;
+
+        const qz = getQZ();
+        if (!qz) return;
+
+        if (qz.websocket.isActive()) {
+          return; // nothing to do
+        }
+
+        log("Browser lifecycle event:", event, "— websocket inactive, reconnecting");
+        try {
+          await reconnect("lifecycle:" + event);
+        } catch (e) {
+          error("Lifecycle reconnect failed:", e.message);
+        }
+      };
+
+      window.addEventListener("focus", () => recover("focus"));
+      window.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") {
+          recover("visibilitychange");
+        }
+      });
+      window.addEventListener("online", () => recover("online"));
+
+      log("Browser lifecycle listeners registered (focus, visibilitychange, online)");
+    };
+
+    // --- Startup ---
+
+    const qz = await waitForQZ();
+    if (qz) {
+      registerCloseCallback();
+    }
+    registerBrowserLifecycle();
+    startHeartbeat();
+
+    // --- Public API ---
 
     return {
       connect,
       print,
-      getPrinters,
+      getDefaultPrinter,
       getQZ,
     };
   },

@@ -4,9 +4,6 @@ import { PosStore } from "@point_of_sale/app/services/pos_store";
 import { patch } from "@web/core/utils/patch";
 import { OrderReceipt } from "@point_of_sale/app/screens/receipt_screen/receipt/order_receipt";
 
-// متغير خارجي لحفظ اسم الطابعة حتى لا نبحث عنها كل مرة
-let cachedPrinterName = null;
-
 patch(PosStore.prototype, {
   async printReceipt({
     basic = false,
@@ -17,77 +14,60 @@ patch(PosStore.prototype, {
     const printMethod = this.config?.receipt_print_method || "chrome";
 
     if (qzService && printMethod === "qz_tray") {
-      try {
-        await qzService.connect();
-        const qzLib = qzService.getQZ();
+      // Printer resolution goes through qzService — handles caching, connection, retry
+      const printerName = await qzService.getDefaultPrinter();
 
-        if (qzLib) {
-          const renderer = this.env.services.renderer;
+      // Render receipt HTML
+      const renderer = this.env.services.renderer;
+      const receiptHtml = await renderer.toHtml(
+        OrderReceipt,
+        {
+          order,
+          basic_receipt: basic,
+        },
+        { addClass: "pos-receipt-print" },
+      );
 
-          // تحويل الفاتورة لـ HTML
-          const receiptHtml = await renderer.toHtml(
-            OrderReceipt,
-            {
-              order,
-              basic_receipt: basic,
-            },
-            { addClass: "pos-receipt-print" },
-          );
-
-          // تعديل: استخدام خطوط النظام (Monospace) بدلاً من تحميل خطوط من السيرفر لتسريع العملية
-          const htmlContent = `<html>
-          <head>
-            <style>
-              body {
-                  font-family: "Courier New", Courier, monospace; 
-                  font-weight: bold;
-              }
-              table {
-                  table-layout: fixed;
-                  width: 100%;
-              }
-              .pos-receipt-print {
-                  font-size: 14px; /* حجم خط مناسب للطابعات الحرارية */
-              }
-            </style>
-          </head>
-          <body>${receiptHtml.outerHTML}</body>
-          </html>`;
-
-          // تعديل: جلب الطابعة مرة واحدة فقط وحفظها
-          if (!cachedPrinterName) {
-            // يمكنك هنا وضع اسم الطابعة يدوياً إذا أردت سرعة قصوى
-            // cachedPrinterName = "اسم الطابعة في الويندوز";
-            cachedPrinterName = await qzLib.printers.getDefault();
-            console.log("Printer cached:", cachedPrinterName);
+      const htmlContent = `<html>
+      <head>
+        <style>
+          body {
+              font-family: "Courier New", Courier, monospace;
+              font-weight: bold;
           }
-
-          // Print using cached name — skipConnect=true because we already connected above
-          await qzService.print(cachedPrinterName, htmlContent, "pixel", {}, true);
-
-          // تحديث عداد الطباعة (نفس كود أودو الأصلي)
-          if (!printBillActionTriggered) {
-            const count = order.nb_print ? order.nb_print + 1 : 1;
-            if (order.isSynced) {
-              const wasDirty = order.isDirty();
-              await this.data.write("pos.order", [order.id], {
-                nb_print: count,
-              });
-              if (!wasDirty) {
-                order._dirty = false;
-              }
-            } else {
-              order.nb_print = count;
-            }
-          } else if (!order.nb_print) {
-            order.nb_print = 0;
+          table {
+              table-layout: fixed;
+              width: 100%;
           }
+          .pos-receipt-print {
+              font-size: 14px;
+          }
+        </style>
+      </head>
+      <body>${receiptHtml.outerHTML}</body>
+      </html>`;
 
-          return { successful: true };
+      await qzService.print(printerName, htmlContent, "pixel", {});
+
+      // Update print count (same logic as Odoo's original)
+      if (!printBillActionTriggered) {
+        const count = order.nb_print ? order.nb_print + 1 : 1;
+        if (order.isSynced) {
+          const wasDirty = order.isDirty();
+          await this.data.write("pos.order", [order.id], {
+            nb_print: count,
+          });
+          if (!wasDirty) {
+            order._dirty = false;
+          }
+        } else {
+          order.nb_print = count;
         }
-      } catch (error) {
-        console.error("QZ Print Error:", error);
+      } else if (!order.nb_print) {
+        order.nb_print = 0;
       }
+
+      return { successful: true };
     }
 
     return super.printReceipt({ basic, order, printBillActionTriggered });
