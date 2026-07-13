@@ -63,7 +63,6 @@ export const qzTrayService = {
         const certRes = await fetch("/qz/certificate");
         if (certRes.ok) {
           cachedCert = await certRes.text();
-          log("Certificate cached client-side");
         }
       } catch (e) {
         warn("Failed to pre-cache QZ certificate:", e);
@@ -73,7 +72,6 @@ export const qzTrayService = {
         const keyRes = await fetch("/qz/private_key");
         if (keyRes.ok) {
           cachedPrivateKey = await keyRes.text();
-          log("Private Key cached client-side");
         }
       } catch (e) {
         warn("Failed to pre-cache QZ private key:", e);
@@ -218,7 +216,6 @@ export const qzTrayService = {
       });
 
       securityConfigured = true;
-      log("Security configured successfully");
     };
 
     // --- Connection management ---
@@ -229,7 +226,6 @@ export const qzTrayService = {
 
       try {
         await qz.websocket.disconnect();
-        log("Disconnected — reason:", reason);
       } catch (e) {
         warn("Disconnect error (ignored) — reason:", reason, "—", e.message || e);
       }
@@ -264,7 +260,6 @@ export const qzTrayService = {
         const msg = (e.message || String(e)).toLowerCase();
         // "Already connected" / "already exists" are not errors — treat as success
         if (msg.includes("already connected") || msg.includes("already exists")) {
-          log("Already connected (treated as success)");
           return;
         }
         // Connect failed — ensure no half-open socket
@@ -273,7 +268,6 @@ export const qzTrayService = {
         throw e;
       }
 
-      log("Connected — took", Date.now() - t0, "ms");
     };
 
     /**
@@ -282,13 +276,11 @@ export const qzTrayService = {
      */
     const reconnect = async (reason = "unspecified") => {
       if (reconnectPromise) {
-        log("Reconnect already in progress — coalescing (reason:", reason, ")");
         return reconnectPromise;
       }
 
       reconnectPromise = (async () => {
         const t0 = Date.now();
-        log("Reconnecting — reason:", reason);
 
         try {
           await safeDisconnect("reconnect: " + reason);
@@ -300,7 +292,6 @@ export const qzTrayService = {
 
           // Invalidate cached printer after reconnect — it may reference stale state
           cachedPrinterName = null;
-          log("Reconnect successful — took", Date.now() - t0, "ms");
         } catch (e) {
           error("Reconnect failed — took", Date.now() - t0, "ms —", e.message);
           throw e;
@@ -325,7 +316,6 @@ export const qzTrayService = {
         return;
       }
 
-      log("Websocket inactive — triggering reconnect (reason:", reason, ")");
       await reconnect(reason);
     };
 
@@ -367,7 +357,6 @@ export const qzTrayService = {
       try {
         await ensureConnected("getDefaultPrinter");
         cachedPrinterName = await fetchPrinter();
-        log("Default printer resolved:", cachedPrinterName);
         return cachedPrinterName;
       } catch (e) {
         // If printer fetch failed, reconnect and retry once
@@ -375,7 +364,6 @@ export const qzTrayService = {
         cachedPrinterName = null;
         await reconnect("getDefaultPrinter failure");
         cachedPrinterName = await fetchPrinter();
-        log("Default printer resolved (after retry):", cachedPrinterName);
         return cachedPrinterName;
       }
     };
@@ -435,7 +423,6 @@ export const qzTrayService = {
         try {
           await reconnect("print:retry");
           await executePrint(printerName, data, type, options);
-          log("Print retry succeeded — took", Date.now() - t0, "ms");
         } catch (retryErr) {
           error(
             "Print retry failed — gave up after",
@@ -498,14 +485,12 @@ export const qzTrayService = {
         }
       }, HEARTBEAT_INTERVAL_MS);
 
-      log("Heartbeat started — interval:", HEARTBEAT_INTERVAL_MS, "ms");
     };
 
     const stopHeartbeat = () => {
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer);
         heartbeatTimer = null;
-        log("Heartbeat stopped");
       }
     };
 
@@ -514,7 +499,6 @@ export const qzTrayService = {
     const registerCloseCallback = () => {
       const qz = getQZ();
       if (!qz?.websocket?.setClosedCallbacks) {
-        log("WebSocket close callbacks not supported by QZ Tray version");
         return;
       }
 
@@ -525,7 +509,6 @@ export const qzTrayService = {
         // Reconnecting inside a callback can race with QZ internal state.
       });
 
-      log("WebSocket close callback registered");
     };
 
     // --- Browser lifecycle recovery ---
@@ -541,7 +524,6 @@ export const qzTrayService = {
           return; // nothing to do
         }
 
-        log("Browser lifecycle event:", event, "— websocket inactive, reconnecting");
         try {
           await reconnect("lifecycle:" + event);
         } catch (e) {
@@ -557,7 +539,6 @@ export const qzTrayService = {
       });
       window.addEventListener("online", () => recover("online"));
 
-      log("Browser lifecycle listeners registered (focus, visibilitychange, online)");
     };
 
     // --- Startup ---
